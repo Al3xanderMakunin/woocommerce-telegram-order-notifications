@@ -36,7 +36,7 @@ add_action( 'before_woocommerce_init', static function () {
 
 add_action( 'woocommerce_new_order', __NAMESPACE__ . '\enqueue_automatically' );
 add_action( 'woocommerce_order_status_changed', __NAMESPACE__ . '\enqueue_automatically' );
-add_action( SEND_HOOK, __NAMESPACE__ . '\send_order', 10, 4 );
+add_action( SEND_HOOK, __NAMESPACE__ . '\send_order', 10, 5 );
 
 function external_config_value( string $key ): ?string {
 	$value = defined( $key ) ? constant( $key ) : getenv( $key );
@@ -237,7 +237,7 @@ function telegram_order_request( string $base, string $chat_id, string $message,
 	return telegram_request( $base, 'sendDocument', $body, 'multipart/form-data; boundary=' . $boundary );
 }
 
-function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = false, string $retry_chat_id = '' ): string {
+function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = false, string $retry_chat_id = '', bool $resend = false ): string {
 	global $wpdb;
 
 	$lock = 'wcton:' . substr( hash( 'sha256', $wpdb->prefix . ':' . DB_NAME . ':' . $order_id ), 0, 48 );
@@ -252,7 +252,7 @@ function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = 
 		}
 		// Another worker may have saved a receipt before we acquired the lock.
 		$order->read_meta_data( true );
-		if ( $order->get_meta( MESSAGE_ID_META ) ) {
+		if ( ! $resend && $order->get_meta( MESSAGE_ID_META ) ) {
 			return 'already_sent';
 		}
 		if ( $order->get_meta( IN_FLIGHT_META ) && ! $retry_unconfirmed ) {
@@ -278,14 +278,14 @@ function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = 
 		$result = 'already_sent';
 		$errors = array();
 		foreach ( $chat_ids as $chat_id ) {
-			if ( isset( $deliveries[ $chat_id ]['message_id'] ) ) {
+			if ( ! $resend && isset( $deliveries[ $chat_id ]['message_id'] ) ) {
 				continue;
 			}
 			try {
 				if ( ! empty( $deliveries[ $chat_id ]['unconfirmed'] ) && ! $retry_unconfirmed ) {
 					throw new \RuntimeException( 'A previous delivery is unconfirmed. Check the Telegram chat before retrying.' );
 				}
-				$status = send_to_chat( $order, $base, $chat_id, $message ??= message_for( $order ), $attempt, $deliveries );
+				$status = send_to_chat( $order, $base, $chat_id, $message ??= message_for( $order ), $attempt, $deliveries, $resend );
 				if ( $result !== 'scheduled' ) {
 					$result = $status;
 				}
@@ -302,8 +302,8 @@ function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = 
 	}
 }
 
-function send_to_chat( \WC_Order $order, string $base, string $chat_id, string $message, int $attempt, array &$deliveries ): string {
-	$deliveries[ $chat_id ] = array( 'unconfirmed' => true );
+function send_to_chat( \WC_Order $order, string $base, string $chat_id, string $message, int $attempt, array &$deliveries, bool $resend = false ): string {
+	$deliveries[ $chat_id ]['unconfirmed'] = true;
 	$order->update_meta_data( CHAT_DELIVERY_META, $deliveries );
 	$order->save_meta_data();
 
@@ -318,12 +318,15 @@ function send_to_chat( \WC_Order $order, string $base, string $chat_id, string $
 
 	$error_code = $data['error_code'] ?? null;
 	if ( ( $data['ok'] ?? null ) === false && is_int( $error_code ) ) {
-		$deliveries[ $chat_id ] = array();
+		unset( $deliveries[ $chat_id ]['unconfirmed'] );
 		$order->update_meta_data( CHAT_DELIVERY_META, $deliveries );
 		$order->save_meta_data();
 		if ( $error_code === 429 && $attempt < MAX_RATE_LIMIT_RETRIES ) {
 			$delay = max( 60, (int) ( $data['parameters']['retry_after'] ?? 60 ) );
 			$args = array( $order->get_id(), $attempt + 1, false, $chat_id );
+			if ( $resend ) {
+				$args[] = true;
+			}
 			if ( as_schedule_single_action( time() + $delay, SEND_HOOK, $args, GROUP ) ) {
 				return 'scheduled';
 			}

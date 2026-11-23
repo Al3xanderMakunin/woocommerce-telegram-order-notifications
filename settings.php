@@ -74,7 +74,7 @@ function handle_manual_send(): void {
 	$result = 'invalid_order';
 	if ( $order_id !== false ) {
 		try {
-			$result = send_order( $order_id, 0, ( $_POST['wcton_retry_unconfirmed'] ?? '' ) === '1' );
+			$result = send_order( $order_id, 0, ( $_POST['wcton_retry_unconfirmed'] ?? '' ) === '1', '', true );
 		} catch ( \RuntimeException $error ) {
 			$result = 'failed';
 			// The delivery exceptions exclude bot credentials and HTTP response bodies.
@@ -146,7 +146,7 @@ function render_settings_page(): void {
 			<?php submit_button(); ?>
 		</form>
 		<h2>Ручная отправка</h2>
-		<p>Введите внутренний ID заказа WooCommerce, чтобы отправить уведомление сразу.</p>
+		<p>Введите внутренний ID заказа WooCommerce. Уведомление отправится во все настроенные чаты, даже если Telegram уже принял его ранее.</p>
 		<form action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" method="post">
 			<input type="hidden" name="action" value="<?php echo esc_attr( MANUAL_SEND_ACTION ); ?>">
 			<?php wp_nonce_field( MANUAL_SEND_ACTION ); ?>
