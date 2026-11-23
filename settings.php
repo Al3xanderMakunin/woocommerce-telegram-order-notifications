@@ -31,7 +31,7 @@ add_filter( 'plugin_action_links_' . plugin_basename( __DIR__ . '/woocommerce-te
 function settings_fields_definition(): array {
 	return array(
 		'WCTON_BOT_TOKEN' => array( 'Токен бота', 'password', 'Введите токен из BotFather. Если токен уже сохранён, оставьте поле пустым, чтобы сохранить его.', 'valid_bot_token', 'Проверьте формат токена бота из BotFather.' ),
-		'WCTON_CHAT_ID'   => array( 'ID чата', 'text', 'Укажите числовой ID чата или публичное имя в формате @username.', 'valid_chat_id', 'Укажите корректный ID чата или имя в формате @username.' ),
+		'WCTON_CHAT_ID'   => array( 'Чаты для уведомлений', 'textarea', 'Укажите числовые ID чатов или публичные имена в формате @username. Разделяйте их переносами строк, запятыми или пробелами.', 'chat_ids', 'Проверьте список чатов. Допустимы числовые ID и имена в формате @username.' ),
 		'WCTON_PROXY_URL' => array( 'Адрес прокси', 'url', 'Укажите базовый HTTPS-адрес доверенного прокси. Для прямого подключения к Telegram оставьте поле пустым.', 'valid_proxy_url', 'Укажите базовый HTTPS-адрес прокси без логина, пароля, параметров и фрагмента.' ),
 	);
 }
@@ -100,7 +100,7 @@ function render_manual_send_notice(): void {
 		'already_sent'      => array( 'info', 'Telegram уже принял уведомление об этом заказе.' ),
 		'sent'              => array( 'success', 'Telegram принял уведомление.' ),
 		'scheduled'         => array( 'warning', 'Telegram ограничил частоту запросов. Повтор поставлен в очередь.' ),
-		'failed'            => array( 'error', 'Не удалось подтвердить отправку. Проверьте чат перед повтором.' ),
+		'failed'            => array( 'error', 'Возникли ошибки при отправке в указанные чаты.' ),
 	);
 	list( $type, $message ) = $messages[ $result ];
 	wp_admin_notice( esc_html( trim( $message . ' ' . $detail ) ), array( 'type' => $type ) );
@@ -128,9 +128,14 @@ function render_settings_page(): void {
 					<tr>
 						<th scope="row"><label for="<?php echo esc_attr( $id ); ?>"><?php echo esc_html( $label ); ?></label></th>
 						<td>
+							<?php if ( $type === 'textarea' ) : ?>
+								<textarea class="regular-text" rows="4" id="<?php echo esc_attr( $id ); ?>" name="<?php echo esc_attr( SETTINGS_OPTION . '[' . $key . ']' ); ?>"
+									aria-describedby="<?php echo esc_attr( $id . '_description' ); ?>" <?php disabled( $external !== null ); ?>><?php echo esc_textarea( $value ); ?></textarea>
+							<?php else : ?>
 							<input class="regular-text" id="<?php echo esc_attr( $id ); ?>" name="<?php echo esc_attr( SETTINGS_OPTION . '[' . $key . ']' ); ?>"
 								type="<?php echo esc_attr( $type ); ?>" value="<?php echo esc_attr( $value ); ?>" aria-describedby="<?php echo esc_attr( $id . '_description' ); ?>"
 								<?php disabled( $external !== null ); ?> <?php echo $type === 'password' ? 'autocomplete="new-password"' : ''; ?>>
+							<?php endif; ?>
 							<p class="description" id="<?php echo esc_attr( $id . '_description' ); ?>">
 								<?php echo esc_html( $external !== null ? sprintf( 'Значение %s задано в wp-config.php или переменной среды.', $key ) : $description ); ?>
 							</p>
@@ -152,7 +157,7 @@ function render_settings_page(): void {
 			<p>
 				<label>
 					<input name="wcton_retry_unconfirmed" type="checkbox" value="1">
-					Я проверил чат. Повторить отправку, если результат предыдущей попытки неизвестен.
+					Я проверил чаты. Повторить отправку туда, где результат предыдущей попытки неизвестен.
 				</label>
 			</p>
 			<?php submit_button( 'Отправить уведомление', 'secondary' ); ?>

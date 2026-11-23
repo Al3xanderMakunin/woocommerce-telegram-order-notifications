@@ -20,6 +20,7 @@ const SEND_HOOK = 'wcton_send_paid_order';
 const GROUP = 'wc-telegram-orders';
 const MESSAGE_ID_META = '_wcton_message_id';
 const IN_FLIGHT_META = '_wcton_delivery_unconfirmed';
+const CHAT_DELIVERY_META = '_wcton_chat_deliveries';
 const MAX_RATE_LIMIT_RETRIES = 3;
 const SETTINGS_OPTION = 'wcton_settings';
 
@@ -35,7 +36,7 @@ add_action( 'before_woocommerce_init', static function () {
 
 add_action( 'woocommerce_new_order', __NAMESPACE__ . '\enqueue_automatically' );
 add_action( 'woocommerce_order_status_changed', __NAMESPACE__ . '\enqueue_automatically' );
-add_action( SEND_HOOK, __NAMESPACE__ . '\send_order', 10, 3 );
+add_action( SEND_HOOK, __NAMESPACE__ . '\send_order', 10, 4 );
 
 function external_config_value( string $key ): ?string {
 	$value = defined( $key ) ? constant( $key ) : getenv( $key );
@@ -54,6 +55,17 @@ function valid_chat_id( string $chat_id ): bool {
 	return (bool) preg_match( '/^(?:-?[1-9]\d*|@[A-Za-z0-9_]+)$/D', $chat_id );
 }
 
+function chat_ids( string $value ): array {
+	$ids = preg_split( '/[,\s]+/', trim( $value ), -1, PREG_SPLIT_NO_EMPTY );
+	foreach ( $ids as &$id ) {
+		if ( ! valid_chat_id( $id ) ) {
+			return array();
+		}
+		$id = strtolower( $id );
+	}
+	return array_values( array_unique( $ids ) );
+}
+
 function valid_proxy_url( string $proxy ): bool {
 	if ( $proxy === '' ) {
 		return true;
@@ -67,17 +79,17 @@ function valid_proxy_url( string $proxy ): bool {
 function configuration(): array {
 	$settings = (array) get_option( SETTINGS_OPTION, array() );
 	$token = config_value( 'WCTON_BOT_TOKEN', $settings );
-	$chat_id = config_value( 'WCTON_CHAT_ID', $settings );
+	$chat_ids = chat_ids( config_value( 'WCTON_CHAT_ID', $settings ) );
 	$proxy = config_value( 'WCTON_PROXY_URL', $settings );
 
-	if ( ! valid_bot_token( $token ) || ! valid_chat_id( $chat_id ) ) {
-		throw new \RuntimeException( 'Configure the Telegram bot token and chat ID under Settings → WooCommerce Telegram or via WCTON_BOT_TOKEN and WCTON_CHAT_ID.' );
+	if ( ! valid_bot_token( $token ) || ! $chat_ids ) {
+		throw new \RuntimeException( 'Configure the Telegram bot token and chat IDs under Settings → WooCommerce Telegram or via WCTON_BOT_TOKEN and WCTON_CHAT_ID.' );
 	}
 	if ( ! valid_proxy_url( $proxy ) ) {
 		throw new \RuntimeException( 'The Bot API proxy must be an HTTPS base URL.' );
 	}
 	$base = $proxy === '' ? 'https://api.telegram.org' : rtrim( $proxy, '/' );
-	return array( $base . '/bot' . $token . '/', $chat_id );
+	return array( $base . '/bot' . $token . '/', $chat_ids );
 }
 
 function telegram_request( string $base, string $method, array|string $body, string $content_type = 'application/json' ): array {
@@ -112,7 +124,8 @@ function get_order_for_notification( int $order_id ): ?\WC_Order {
 function enqueue_automatically( int $order_id ): void {
 	$order = get_order_for_notification( $order_id );
 	if ( ! did_action( 'action_scheduler_init' ) || ! $order ||
-		$order->get_meta( MESSAGE_ID_META ) || $order->get_meta( IN_FLIGHT_META ) ) {
+		$order->get_meta( MESSAGE_ID_META ) || $order->get_meta( IN_FLIGHT_META ) ||
+		$order->get_meta( CHAT_DELIVERY_META ) ) {
 		return;
 	}
 	try {
@@ -224,7 +237,7 @@ function telegram_order_request( string $base, string $chat_id, string $message,
 	return telegram_request( $base, 'sendDocument', $body, 'multipart/form-data; boundary=' . $boundary );
 }
 
-function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = false ): string {
+function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = false, string $retry_chat_id = '' ): string {
 	global $wpdb;
 
 	$lock = 'wcton:' . substr( hash( 'sha256', $wpdb->prefix . ':' . DB_NAME . ':' . $order_id ), 0, 48 );
@@ -246,57 +259,114 @@ function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = 
 			throw new \RuntimeException( 'A previous delivery is unconfirmed. Check the Telegram chat before retrying.' );
 		}
 
-		list( $base, $chat_id ) = configuration();
-		$message = message_for( $order );
-		$order->update_meta_data( IN_FLIGHT_META, time() );
-		$order->save_meta_data();
-		$data = telegram_order_request( $base, $chat_id, $message, $order_id );
-		$message_id = $data['result']['message_id'] ?? 0;
-		if ( ( $data['ok'] ?? null ) === true && is_int( $message_id ) && $message_id > 0 ) {
-			// Persist the receipt before removing the marker in case execution is interrupted.
-			$order->update_meta_data( MESSAGE_ID_META, $message_id );
+		list( $base, $chat_ids ) = configuration();
+		if ( $retry_chat_id !== '' ) {
+			$chat_ids = array_intersect( $chat_ids, array( $retry_chat_id ) );
+		}
+		$deliveries = (array) $order->get_meta( CHAT_DELIVERY_META, true );
+		if ( $order->get_meta( IN_FLIGHT_META ) ) {
+			foreach ( $chat_ids as $chat_id ) {
+				$deliveries[ $chat_id ] ??= array( 'unconfirmed' => true );
+			}
+			$order->update_meta_data( CHAT_DELIVERY_META, $deliveries );
 			$order->save_meta_data();
 			$order->delete_meta_data( IN_FLIGHT_META );
 			$order->save_meta_data();
-			return 'sent';
 		}
 
-		$error_code = $data['error_code'] ?? null;
-		if ( ( $data['ok'] ?? null ) === false && is_int( $error_code ) ) {
-			$order->delete_meta_data( IN_FLIGHT_META );
-			$order->save_meta_data();
-			if ( $error_code === 429 && $attempt < MAX_RATE_LIMIT_RETRIES ) {
-				$delay = max( 60, (int) ( $data['parameters']['retry_after'] ?? 60 ) );
-				$action = as_schedule_single_action( time() + $delay, SEND_HOOK, array( $order_id, $attempt + 1, false ), GROUP );
-				if ( $action ) {
-					return 'scheduled';
-				}
+		$message = null;
+		$result = 'already_sent';
+		$errors = array();
+		foreach ( $chat_ids as $chat_id ) {
+			if ( isset( $deliveries[ $chat_id ]['message_id'] ) ) {
+				continue;
 			}
-			throw new \RuntimeException( sprintf( 'Telegram rejected the notification (API code %d).', $error_code ) );
+			try {
+				if ( ! empty( $deliveries[ $chat_id ]['unconfirmed'] ) && ! $retry_unconfirmed ) {
+					throw new \RuntimeException( 'A previous delivery is unconfirmed. Check the Telegram chat before retrying.' );
+				}
+				$status = send_to_chat( $order, $base, $chat_id, $message ??= message_for( $order ), $attempt, $deliveries );
+				if ( $result !== 'scheduled' ) {
+					$result = $status;
+				}
+			} catch ( \RuntimeException $error ) {
+				$errors[] = sprintf( '%s — %s', $chat_id, $error->getMessage() );
+			}
 		}
-		throw new \RuntimeException( 'Bot API did not return a message ID. Delivery is unconfirmed.' );
+		if ( $errors ) {
+			throw new \RuntimeException( implode( ' ', $errors ) );
+		}
+		return $result;
 	} finally {
 		$wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
 	}
 }
 
+function send_to_chat( \WC_Order $order, string $base, string $chat_id, string $message, int $attempt, array &$deliveries ): string {
+	$deliveries[ $chat_id ] = array( 'unconfirmed' => true );
+	$order->update_meta_data( CHAT_DELIVERY_META, $deliveries );
+	$order->save_meta_data();
+
+	$data = telegram_order_request( $base, $chat_id, $message, $order->get_id() );
+	$message_id = $data['result']['message_id'] ?? 0;
+	if ( ( $data['ok'] ?? null ) === true && is_int( $message_id ) && $message_id > 0 ) {
+		$deliveries[ $chat_id ] = array( 'message_id' => $message_id );
+		$order->update_meta_data( CHAT_DELIVERY_META, $deliveries );
+		$order->save_meta_data();
+		return 'sent';
+	}
+
+	$error_code = $data['error_code'] ?? null;
+	if ( ( $data['ok'] ?? null ) === false && is_int( $error_code ) ) {
+		$deliveries[ $chat_id ] = array();
+		$order->update_meta_data( CHAT_DELIVERY_META, $deliveries );
+		$order->save_meta_data();
+		if ( $error_code === 429 && $attempt < MAX_RATE_LIMIT_RETRIES ) {
+			$delay = max( 60, (int) ( $data['parameters']['retry_after'] ?? 60 ) );
+			$args = array( $order->get_id(), $attempt + 1, false, $chat_id );
+			if ( as_schedule_single_action( time() + $delay, SEND_HOOK, $args, GROUP ) ) {
+				return 'scheduled';
+			}
+		}
+		throw new \RuntimeException( sprintf( 'Telegram rejected the notification (API code %d).', $error_code ) );
+	}
+	throw new \RuntimeException( 'Bot API did not return a message ID. Delivery is unconfirmed.' );
+}
+
 if ( defined( 'WP_CLI' ) && WP_CLI ) {
 	\WP_CLI::add_command( 'wc-telegram check', static function ( $args, $assoc_args ) {
 		try {
-			list( $base, $chat_id ) = configuration();
-			$data = isset( $assoc_args['send-test'] )
-				? telegram_request( $base, 'sendMessage', array(
-					'chat_id' => $chat_id,
-					'text'    => 'Тест уведомлений WooCommerce',
-				) )
-				: telegram_request( $base, 'getMe', array() );
-			if ( ! empty( $data['ok'] ) ) {
-				\WP_CLI::success( isset( $assoc_args['send-test'] ) ? 'Telegram accepted the test message.' : 'Bot API connection verified.' );
+			list( $base, $chat_ids ) = configuration();
+			if ( ! isset( $assoc_args['send-test'] ) ) {
+				$data = telegram_request( $base, 'getMe', array() );
+				if ( empty( $data['ok'] ) ) {
+					throw new \RuntimeException( sprintf( 'Telegram rejected the request (API code %d).', $data['error_code'] ?? 0 ) );
+				}
+				\WP_CLI::success( 'Bot API connection verified.' );
 				return;
 			}
-			\WP_CLI::error( sprintf( 'Telegram rejected the request (API code %d).', $data['error_code'] ?? 0 ) );
 		} catch ( \RuntimeException $error ) {
 			\WP_CLI::error( $error->getMessage() );
+		}
+
+		$failed = false;
+		foreach ( $chat_ids as $chat_id ) {
+			try {
+				$data = telegram_request( $base, 'sendMessage', array(
+					'chat_id' => $chat_id,
+					'text'    => 'Тест уведомлений WooCommerce',
+				) );
+				if ( empty( $data['ok'] ) ) {
+					throw new \RuntimeException( sprintf( 'Telegram rejected the request (API code %d).', $data['error_code'] ?? 0 ) );
+				}
+				\WP_CLI::success( sprintf( 'Telegram accepted the test message for %s.', $chat_id ) );
+			} catch ( \RuntimeException $error ) {
+				\WP_CLI::warning( sprintf( '%s — %s', $chat_id, $error->getMessage() ) );
+				$failed = true;
+			}
+		}
+		if ( $failed ) {
+			\WP_CLI::halt( 1 );
 		}
 	}, array( 'synopsis' => '[--send-test]' ) );
 
