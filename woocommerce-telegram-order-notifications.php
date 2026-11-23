@@ -3,7 +3,7 @@
  * Plugin Name: WooCommerce Telegram Order Notifications
  * Plugin URI: https://github.com/Al3xanderMakunin/woocommerce-telegram-order-notifications
  * Description: Sends order notifications to Telegram independently of WordPress email.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Александр Макунин
  * Requires at least: 6.5
  * Requires PHP: 8.0
@@ -80,12 +80,12 @@ function configuration(): array {
 	return array( $base . '/bot' . $token . '/', $chat_id );
 }
 
-function telegram_request( string $base, string $method, array $body ): array {
+function telegram_request( string $base, string $method, array|string $body, string $content_type = 'application/json' ): array {
 	$response = wp_safe_remote_post( $base . $method, array(
 		'timeout'     => 15,
 		'redirection' => 0,
-		'headers'     => array( 'Content-Type' => 'application/json' ),
-		'body'        => wp_json_encode( $body ),
+		'headers'     => array( 'Content-Type' => $content_type ),
+		'body'        => is_array( $body ) ? wp_json_encode( $body ) : $body,
 	) );
 
 	if ( is_wp_error( $response ) ) {
@@ -133,15 +133,95 @@ function enqueue( int $order_id, bool $retry_unconfirmed = false ): int {
 	return as_enqueue_async_action( SEND_HOOK, $args, GROUP );
 }
 
+function plain_text( string $html ): string {
+	return trim( html_entity_decode( wp_strip_all_tags( $html ), ENT_QUOTES, 'UTF-8' ) );
+}
+
 function message_for( \WC_Order $order ): string {
-	$total = html_entity_decode( wp_strip_all_tags( $order->get_formatted_order_total() ), ENT_QUOTES, 'UTF-8' );
-	return sprintf(
-		"Заказ №%s\nСумма: %s\nСтатус: %s\n%s",
-		$order->get_order_number(),
-		$total,
-		wc_get_order_status_name( $order->get_status() ),
-		$order->get_edit_order_url()
+	$use_tax = $order->get_prices_include_tax();
+	$price = static function ( $amount ) use ( $order ): string {
+		return plain_text( wc_price( $amount, array( 'currency' => $order->get_currency() ) ) );
+	};
+
+	$date = $order->get_date_created();
+	$payment = $order->get_payment_method_title() ?: $order->get_payment_method();
+	$shipping_methods = $order->get_shipping_method();
+	$shipping = $price( (float) $order->get_shipping_total() + ( $use_tax ? (float) $order->get_shipping_tax() : 0 ) );
+	$coupons = $order->get_coupon_codes();
+	$discount = $price( $order->get_total_discount( ! $use_tax ) );
+
+	$lines = array(
+		'Заказ №' . $order->get_order_number(),
+		'Дата заказа: ' . ( $date ? wc_format_datetime( $date, 'd.m.Y H:i' ) : '—' ),
+		'Сумма: ' . plain_text( $order->get_formatted_order_total() ),
+		'Статус: ' . wc_get_order_status_name( $order->get_status() ),
+		'Скидка: ' . $discount . ( $coupons ? ' (' . implode( ', ', $coupons ) . ')' : '' ),
+		'Доставка: ' . ( $shipping_methods ? plain_text( $shipping_methods ) . ' — ' : '' ) . $shipping,
+		'Способ оплаты: ' . ( plain_text( $payment ) ?: '—' ),
 	);
+
+	foreach ( array( 'billing' => 'Платёжный адрес', 'shipping' => 'Адрес доставки' ) as $type => $label ) {
+		$address = $type === 'billing' ? $order->get_formatted_billing_address() : $order->get_formatted_shipping_address();
+		$address = plain_text( preg_replace( '~<br\s*/?>~i', ', ', $address ) );
+		if ( $address !== '' ) {
+			$lines[] = $label . ': ' . $address;
+		}
+	}
+
+	$contacts = array(
+		'Покупатель' => $order->get_formatted_billing_full_name(),
+		'Компания' => $order->get_billing_company(),
+		'Телефон' => $order->get_billing_phone(),
+		'Email' => $order->get_billing_email(),
+		'Телефон получателя' => $order->get_shipping_phone(),
+		'Примечание покупателя' => $order->get_customer_note(),
+	);
+	foreach ( $contacts as $label => $value ) {
+		if ( trim( $value ) !== '' ) {
+			$lines[] = $label . ': ' . $value;
+		}
+	}
+
+	$lines[] = '';
+	$lines[] = 'Товары:';
+	foreach ( $order->get_items() as $item ) {
+		$subtotal = $order->get_line_subtotal( $item, $use_tax, false );
+		$total = $order->get_line_total( $item, $use_tax, false );
+		$line = sprintf(
+			'• %s — кол-во: %s, цена за единицу: %s, сумма: %s',
+			$item->get_name(),
+			$item->get_quantity(),
+			$price( $order->get_item_subtotal( $item, $use_tax, false ) ),
+			$price( $total )
+		);
+		if ( $subtotal > $total ) {
+			$line .= ', скидка: ' . $price( $subtotal - $total );
+		}
+		$lines[] = $line;
+	}
+
+	$lines[] = '';
+	$lines[] = $order->get_edit_order_url();
+	return implode( "\n", $lines );
+}
+
+function telegram_order_request( string $base, string $chat_id, string $message, int $order_id ): array {
+	// Counting UTF-16 units also keeps messages with supplementary characters within the limit.
+	$length = preg_match_all( '/./us', $message );
+	$supplementary = preg_match_all( '/[\x{10000}-\x{10FFFF}]/u', $message );
+	if ( $length !== false && $length + $supplementary <= 4096 ) {
+		return telegram_request( $base, 'sendMessage', array(
+			'chat_id' => $chat_id,
+			'text'    => $message,
+		) );
+	}
+
+	$boundary = 'wcton-' . wp_generate_uuid4();
+	$body = "--{$boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{$chat_id}\r\n";
+	$body .= "--{$boundary}\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\nЗаказ №{$order_id} (ID WooCommerce)\r\n";
+	$body .= "--{$boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"order-{$order_id}.txt\"\r\n";
+	$body .= "Content-Type: text/plain; charset=UTF-8\r\n\r\n{$message}\r\n--{$boundary}--\r\n";
+	return telegram_request( $base, 'sendDocument', $body, 'multipart/form-data; boundary=' . $boundary );
 }
 
 function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = false ): string {
@@ -167,12 +247,10 @@ function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = 
 		}
 
 		list( $base, $chat_id ) = configuration();
+		$message = message_for( $order );
 		$order->update_meta_data( IN_FLIGHT_META, time() );
 		$order->save_meta_data();
-		$data = telegram_request( $base, 'sendMessage', array(
-			'chat_id' => $chat_id,
-			'text'    => message_for( $order ),
-		) );
+		$data = telegram_order_request( $base, $chat_id, $message, $order_id );
 		$message_id = $data['result']['message_id'] ?? 0;
 		if ( ( $data['ok'] ?? null ) === true && is_int( $message_id ) && $message_id > 0 ) {
 			// Persist the receipt before removing the marker in case execution is interrupted.
