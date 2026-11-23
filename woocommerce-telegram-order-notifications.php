@@ -150,72 +150,115 @@ function plain_text( string $html ): string {
 	return trim( html_entity_decode( wp_strip_all_tags( $html ), ENT_QUOTES, 'UTF-8' ) );
 }
 
+function billing_address_lines( \WC_Order $order ): array {
+	if ( $order->get_billing_country() === 'RU' ) {
+		$countries = WC()->countries;
+		$states = $countries->get_states( 'RU' );
+		$state = $order->get_billing_state();
+		$location = array(
+			$order->get_billing_postcode(),
+			$order->get_billing_city(),
+			$order->get_billing_address_1(),
+			$order->get_billing_address_2(),
+		);
+		$address = array(
+			$order->get_formatted_billing_full_name(),
+			$order->get_billing_company(),
+			$countries->get_countries()['RU'] ?? 'Россия',
+			$states[ $state ] ?? $state,
+			implode( ', ', array_filter( $location, 'strlen' ) ),
+		);
+	} else {
+		$address = preg_split( '~<br\s*/?>~i', $order->get_formatted_billing_address() );
+	}
+
+	$address[] = $order->get_billing_phone();
+	$address[] = $order->get_billing_email();
+	return array_filter( array_map( __NAMESPACE__ . '\plain_text', $address ), 'strlen' );
+}
+
 function message_for( \WC_Order $order ): string {
 	$use_tax = $order->get_prices_include_tax();
-	$price = static function ( $amount ) use ( $order ): string {
-		return plain_text( wc_price( $amount, array( 'currency' => $order->get_currency() ) ) );
+	$currency = $order->get_currency();
+	$price = static function ( float $amount ) use ( $currency ): string {
+		if ( $currency === 'RUB' ) {
+			$decimals = round( $amount, 2 ) === round( $amount ) ? 0 : 2;
+			return number_format( $amount, $decimals, ',', ' ' ) . ' ₽';
+		}
+
+		return plain_text( wc_price( $amount, array( 'currency' => $currency ) ) );
 	};
 
+	$site = plain_text( get_bloginfo( 'name' ) );
+	$source = wp_parse_url( home_url(), PHP_URL_HOST );
+	$app_url = 'https://woocommerce.com/mobile?blog_id=0&utm_campaign=deeplinks_promote_app&utm_medium=email&utm_source=' . rawurlencode( (string) $source ) . '&utm_term=0';
+	$number = '№ ' . $order->get_order_number();
 	$date = $order->get_date_created();
-	$payment = $order->get_payment_method_title() ?: $order->get_payment_method();
-	$shipping_methods = $order->get_shipping_method();
-	$shipping = $price( (float) $order->get_shipping_total() + ( $use_tax ? (float) $order->get_shipping_tax() : 0 ) );
-	$coupons = $order->get_coupon_codes();
-	$discount = $price( $order->get_total_discount( ! $use_tax ) );
+	$customer = plain_text( $order->get_formatted_billing_full_name() );
+	$rule = str_repeat( '-', 30 );
+	$section = str_repeat( '-', 13 );
 
 	$lines = array(
-		'Заказ №' . $order->get_order_number(),
-		'Дата заказа: ' . ( $date ? wc_format_datetime( $date, 'd.m.Y H:i' ) : '—' ),
-		'Сумма: ' . plain_text( $order->get_formatted_order_total() ),
-		'Статус: ' . wc_get_order_status_name( $order->get_status() ),
-		'Скидка: ' . $discount . ( $coupons ? ' (' . implode( ', ', $coupons ) . ')' : '' ),
-		'Доставка: ' . ( $shipping_methods ? plain_text( $shipping_methods ) . ' — ' : '' ) . $shipping,
-		'Способ оплаты: ' . ( plain_text( $payment ) ?: '—' ),
+		"🔔‌[$site]: Новый заказ {$number}🔔",
+		'',
+		"Новый заказ: $number",
+		$rule,
+		'Получен заказ от покупателя' . ( $customer !== '' ? ' ' . $customer : '' ) . ':',
+		'',
+		"[Заказ $number] (" . $order->get_edit_order_url() . ')' . ( $date ? ' (' . wc_format_datetime( $date, 'd.m.Y' ) . ')' : '' ),
+		'',
+		'Товар | Количество | Цена',
+		$rule,
 	);
 
-	foreach ( array( 'billing' => 'Платёжный адрес', 'shipping' => 'Адрес доставки' ) as $type => $label ) {
-		$address = $type === 'billing' ? $order->get_formatted_billing_address() : $order->get_formatted_shipping_address();
-		$address = plain_text( preg_replace( '~<br\s*/?>~i', ', ', $address ) );
-		if ( $address !== '' ) {
-			$lines[] = $label . ': ' . $address;
-		}
-	}
-
-	$contacts = array(
-		'Покупатель' => $order->get_formatted_billing_full_name(),
-		'Компания' => $order->get_billing_company(),
-		'Телефон' => $order->get_billing_phone(),
-		'Email' => $order->get_billing_email(),
-		'Телефон получателя' => $order->get_shipping_phone(),
-		'Примечание покупателя' => $order->get_customer_note(),
-	);
-	foreach ( $contacts as $label => $value ) {
-		if ( trim( $value ) !== '' ) {
-			$lines[] = $label . ': ' . $value;
-		}
-	}
-
-	$lines[] = '';
-	$lines[] = 'Товары:';
+	$subtotal = 0.0;
 	foreach ( $order->get_items() as $item ) {
-		$subtotal = $order->get_line_subtotal( $item, $use_tax, false );
-		$total = $order->get_line_total( $item, $use_tax, false );
-		$line = sprintf(
-			'• %s — кол-во: %s, цена за единицу: %s, сумма: %s',
-			$item->get_name(),
-			$item->get_quantity(),
-			$price( $order->get_item_subtotal( $item, $use_tax, false ) ),
-			$price( $total )
-		);
-		if ( $subtotal > $total ) {
-			$line .= ', скидка: ' . $price( $subtotal - $total );
+		$line_subtotal = $order->get_line_subtotal( $item, $use_tax, false );
+		$subtotal += $line_subtotal;
+		$product_lines = array( plain_text( $item->get_name() ) );
+		foreach ( $item->get_formatted_meta_data( '_', true ) as $meta ) {
+			$product_lines[] = '- ' . plain_text( $meta->display_key ) . ':';
+			$product_lines[] = plain_text( $meta->display_value );
 		}
-		$lines[] = $line;
+		$product_lines[ count( $product_lines ) - 1 ] .= ' | ' . $item->get_quantity() . ' | ' . $price( $line_subtotal );
+		$lines = array_merge( $lines, $product_lines );
 	}
 
-	$lines[] = '';
-	$lines[] = $order->get_edit_order_url();
-	return implode( "\n", $lines );
+	$shipping = $price( (float) $order->get_shipping_total() + ( $use_tax ? (float) $order->get_shipping_tax() : 0 ) );
+	$shipping_method = plain_text( $order->get_shipping_method() );
+	$payment = plain_text( $order->get_payment_method_title() ?: $order->get_payment_method() );
+
+	return implode( "\n", array_merge(
+		$lines,
+		array(
+			'',
+			$section,
+			'',
+			'Подытог: | ' . $price( $subtotal ),
+			$rule,
+			'Скидка: | ' . $price( -$order->get_total_discount( ! $use_tax ) ),
+			$rule,
+			'Доставка: | ' . $shipping . ( $shipping_method !== '' ? ' – ' . $shipping_method : '' ),
+			$rule,
+			'Способ оплаты: | ' . ( $payment ?: '—' ),
+			$rule,
+			'Итого: | ' . $price( $order->get_total() ),
+			'',
+			$section,
+			'',
+			'Платёжный адрес',
+			'',
+		),
+		billing_address_lines( $order ),
+		array(
+			'',
+			'Поздравляем вас с продажей.',
+			'',
+			"Работать с заказами можно в приложении ($app_url).",
+			$rule,
+			"$site — Built with WooCommerce (https://woocommerce.com/) |",
+		)
+	) );
 }
 
 function telegram_order_request( string $base, string $chat_id, string $message, int $order_id ): array {
