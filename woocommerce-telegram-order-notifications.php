@@ -191,35 +191,43 @@ function billing_address_lines( \WC_Order $order ): array {
 	return array_filter( array_map( __NAMESPACE__ . '\plain_text', $address ), 'strlen' );
 }
 
+function telegram_link( string $text, string $url ): string {
+	$url = esc_url_raw( $url, array( 'https', 'http' ) );
+	$text = htmlspecialchars( $text, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' );
+	return $url !== '' ? '<a href="' . htmlspecialchars( $url, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ) . '">' . $text . '</a>' : $text;
+}
+
 function message_for( \WC_Order $order ): string {
+	$escape = static fn( string $text ): string => htmlspecialchars( $text, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' );
 	$use_tax = $order->get_prices_include_tax();
 	$currency = $order->get_currency();
-	$price = static function ( float $amount ) use ( $currency ): string {
+	$price = static function ( float $amount ) use ( $currency, $escape ): string {
 		if ( $currency === 'RUB' ) {
 			$decimals = round( $amount, 2 ) === round( $amount ) ? 0 : 2;
 			return number_format( $amount, $decimals, ',', ' ' ) . ' ₽';
 		}
 
-		return plain_text( wc_price( $amount, array( 'currency' => $currency ) ) );
+		return $escape( plain_text( wc_price( $amount, array( 'currency' => $currency ) ) ) );
 	};
 
-	$site = plain_text( get_bloginfo( 'name' ) );
+	$site = $escape( plain_text( get_bloginfo( 'name' ) ) );
 	$source = wp_parse_url( home_url(), PHP_URL_HOST );
 	$app_url = 'https://woocommerce.com/mobile?blog_id=0&utm_campaign=deeplinks_promote_app&utm_medium=email&utm_source=' . rawurlencode( (string) $source ) . '&utm_term=0';
 	$number = '№ ' . $order->get_order_number();
+	$escaped_number = $escape( $number );
 	$date = $order->get_date_created();
-	$customer = plain_text( $order->get_formatted_billing_full_name() );
+	$customer = $escape( plain_text( $order->get_formatted_billing_full_name() ) );
 	$rule = str_repeat( '-', 30 );
 	$section = str_repeat( '-', 13 );
 
 	$lines = array(
-		"🔔‌[$site]: Новый заказ {$number}🔔",
+		"🔔‌[$site]: Новый заказ {$escaped_number}🔔",
 		'',
-		"Новый заказ: $number",
+		"Новый заказ: $escaped_number",
 		$rule,
 		'Получен заказ от покупателя' . ( $customer !== '' ? ' ' . $customer : '' ) . ':',
 		'',
-		"[Заказ $number] (" . $order->get_edit_order_url() . ')' . ( $date ? ' (' . wc_format_datetime( $date, 'd.m.Y' ) . ')' : '' ),
+		telegram_link( "[Заказ $number]", $order->get_edit_order_url() ) . ( $date ? ' (' . $escape( wc_format_datetime( $date, 'd.m.Y' ) ) . ')' : '' ),
 		'',
 		'Товар | Количество | Цена',
 		$rule,
@@ -229,18 +237,18 @@ function message_for( \WC_Order $order ): string {
 	foreach ( $order->get_items() as $item ) {
 		$line_subtotal = $order->get_line_subtotal( $item, $use_tax, false );
 		$subtotal += $line_subtotal;
-		$product_lines = array( plain_text( $item->get_name() ) );
+		$product_lines = array( $escape( plain_text( $item->get_name() ) ) );
 		foreach ( $item->get_formatted_meta_data( '_', true ) as $meta ) {
-			$product_lines[] = '- ' . plain_text( $meta->display_key ) . ':';
-			$product_lines[] = plain_text( $meta->display_value );
+			$product_lines[] = '- ' . $escape( plain_text( $meta->display_key ) ) . ':';
+			$product_lines[] = $escape( plain_text( $meta->display_value ) );
 		}
-		$product_lines[ count( $product_lines ) - 1 ] .= ' | ' . $item->get_quantity() . ' | ' . $price( $line_subtotal );
+		$product_lines[ count( $product_lines ) - 1 ] .= ' | ' . $escape( (string) $item->get_quantity() ) . ' | ' . $price( $line_subtotal );
 		$lines = array_merge( $lines, $product_lines );
 	}
 
 	$shipping = $price( (float) $order->get_shipping_total() + ( $use_tax ? (float) $order->get_shipping_tax() : 0 ) );
-	$shipping_method = plain_text( $order->get_shipping_method() );
-	$payment = plain_text( $order->get_payment_method_title() ?: $order->get_payment_method() );
+	$shipping_method = $escape( plain_text( $order->get_shipping_method() ) );
+	$payment = $escape( plain_text( $order->get_payment_method_title() ?: $order->get_payment_method() ) );
 
 	return implode( "\n", array_merge(
 		$lines,
@@ -263,34 +271,39 @@ function message_for( \WC_Order $order ): string {
 			'Платёжный адрес',
 			'',
 		),
-		billing_address_lines( $order ),
+		array_map( $escape, billing_address_lines( $order ) ),
 		array(
 			'',
 			'Поздравляем вас с продажей.',
 			'',
-			"Работать с заказами можно в приложении ($app_url).",
+			'Работать с заказами можно в ' . telegram_link( 'приложении', $app_url ) . '.',
 			$rule,
-			"$site — Built with WooCommerce (https://woocommerce.com/) |",
+			"$site — Built with " . telegram_link( 'WooCommerce', 'https://woocommerce.com/' ) . ' |',
 		)
 	) );
 }
 
 function telegram_order_request( string $base, string $chat_id, string $message, int $order_id ): array {
+	$visible_text = html_entity_decode( strip_tags( $message ), ENT_QUOTES, 'UTF-8' );
 	// Counting UTF-16 units also keeps messages with supplementary characters within the limit.
-	$length = preg_match_all( '/./us', $message );
-	$supplementary = preg_match_all( '/[\x{10000}-\x{10FFFF}]/u', $message );
+	$length = preg_match_all( '/./us', $visible_text );
+	$supplementary = preg_match_all( '/[\x{10000}-\x{10FFFF}]/u', $visible_text );
 	if ( $length !== false && $length + $supplementary <= 4096 ) {
 		return telegram_request( $base, 'sendMessage', array(
-			'chat_id' => $chat_id,
-			'text'    => $message,
+			'chat_id'    => $chat_id,
+			'text'       => $message,
+			'parse_mode' => 'HTML',
 		) );
 	}
 
+	// A plain-text attachment needs explicit URLs to keep links accessible.
+	$document = preg_replace( '~<a href="([^"]+)">([^<]*)</a>~', '$2 ($1)', $message );
+	$document = html_entity_decode( $document, ENT_QUOTES, 'UTF-8' );
 	$boundary = 'wcton-' . wp_generate_uuid4();
 	$body = "--{$boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{$chat_id}\r\n";
 	$body .= "--{$boundary}\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\nЗаказ №{$order_id} (ID WooCommerce)\r\n";
 	$body .= "--{$boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"order-{$order_id}.txt\"\r\n";
-	$body .= "Content-Type: text/plain; charset=UTF-8\r\n\r\n{$message}\r\n--{$boundary}--\r\n";
+	$body .= "Content-Type: text/plain; charset=UTF-8\r\n\r\n{$document}\r\n--{$boundary}--\r\n";
 	return telegram_request( $base, 'sendDocument', $body, 'multipart/form-data; boundary=' . $boundary );
 }
 
