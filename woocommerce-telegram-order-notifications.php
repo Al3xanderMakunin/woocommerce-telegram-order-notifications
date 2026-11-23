@@ -20,6 +20,11 @@ const GROUP = 'wc-telegram-orders';
 const MESSAGE_ID_META = '_wcton_message_id';
 const IN_FLIGHT_META = '_wcton_delivery_unconfirmed';
 const MAX_RATE_LIMIT_RETRIES = 3;
+const SETTINGS_OPTION = 'wcton_settings';
+
+if ( is_admin() ) {
+	require_once __DIR__ . '/settings.php';
+}
 
 add_action( 'before_woocommerce_init', static function () {
 	if ( class_exists( \Automattic\WooCommerce\Utilities\FeaturesUtil::class ) ) {
@@ -32,27 +37,46 @@ add_action( 'woocommerce_order_status_processing', __NAMESPACE__ . '\enqueue_aut
 add_action( 'woocommerce_order_status_completed', __NAMESPACE__ . '\enqueue_automatically' );
 add_action( SEND_HOOK, __NAMESPACE__ . '\send_order', 10, 3 );
 
-function config_value( string $key ): string {
+function external_config_value( string $key ): ?string {
 	$value = defined( $key ) ? constant( $key ) : getenv( $key );
-	return is_scalar( $value ) ? trim( (string) $value ) : '';
+	return ! defined( $key ) && $value === false ? null : ( is_scalar( $value ) ? trim( (string) $value ) : '' );
+}
+
+function config_value( string $key, array $settings ): string {
+	return external_config_value( $key ) ?? ( $settings[ $key ] ?? '' );
+}
+
+function valid_bot_token( string $token ): bool {
+	return (bool) preg_match( '/^\d+:[A-Za-z0-9_-]+$/D', $token );
+}
+
+function valid_chat_id( string $chat_id ): bool {
+	return (bool) preg_match( '/^(?:-?[1-9]\d*|@[A-Za-z0-9_]+)$/D', $chat_id );
+}
+
+function valid_proxy_url( string $proxy ): bool {
+	if ( $proxy === '' ) {
+		return true;
+	}
+	$parts = wp_parse_url( $proxy );
+	return is_array( $parts ) && ( $parts['scheme'] ?? '' ) === 'https' && ! empty( $parts['host'] ) &&
+		! isset( $parts['user'] ) && ! isset( $parts['pass'] ) &&
+		! isset( $parts['query'] ) && ! isset( $parts['fragment'] );
 }
 
 function configuration(): array {
-	$token = config_value( 'WCTON_BOT_TOKEN' );
-	$chat_id = config_value( 'WCTON_CHAT_ID' );
-	$proxy = config_value( 'WCTON_PROXY_URL' );
-	$base = $proxy === '' ? 'https://api.telegram.org' : rtrim( $proxy, '/' );
-	$parts = wp_parse_url( $base );
+	$settings = (array) get_option( SETTINGS_OPTION, array() );
+	$token = config_value( 'WCTON_BOT_TOKEN', $settings );
+	$chat_id = config_value( 'WCTON_CHAT_ID', $settings );
+	$proxy = config_value( 'WCTON_PROXY_URL', $settings );
 
-	if ( ! preg_match( '/^\d+:[A-Za-z0-9_-]+$/D', $token ) ||
-		! preg_match( '/^(?:-?[1-9]\d*|@[A-Za-z0-9_]+)$/D', $chat_id ) ) {
-		throw new \RuntimeException( 'Configure WCTON_BOT_TOKEN and WCTON_CHAT_ID.' );
+	if ( ! valid_bot_token( $token ) || ! valid_chat_id( $chat_id ) ) {
+		throw new \RuntimeException( 'Configure the Telegram bot token and chat ID under Settings → WooCommerce Telegram or via WCTON_BOT_TOKEN and WCTON_CHAT_ID.' );
 	}
-	if ( ! is_array( $parts ) || ( $parts['scheme'] ?? '' ) !== 'https' || empty( $parts['host'] ) ||
-		isset( $parts['user'] ) || isset( $parts['pass'] ) || isset( $parts['query'] ) ||
-		isset( $parts['fragment'] ) ) {
-		throw new \RuntimeException( 'WCTON_PROXY_URL must be an HTTPS Bot API base URL.' );
+	if ( ! valid_proxy_url( $proxy ) ) {
+		throw new \RuntimeException( 'The Bot API proxy must be an HTTPS base URL.' );
 	}
+	$base = $proxy === '' ? 'https://api.telegram.org' : rtrim( $proxy, '/' );
 	return array( $base . '/bot' . $token . '/', $chat_id );
 }
 
