@@ -95,12 +95,12 @@ function render_manual_send_notice(): void {
 	delete_transient( $key );
 	list( $result, $detail ) = $notice;
 	$messages = array(
-		'invalid_order' => array( 'error', 'Введите корректный ID заказа.' ),
-		'unpaid'        => array( 'error', 'Оплаченный заказ с таким ID не найден.' ),
-		'already_sent'  => array( 'info', 'Telegram уже принял уведомление об этом заказе.' ),
-		'sent'          => array( 'success', 'Telegram принял уведомление.' ),
-		'scheduled'     => array( 'warning', 'Telegram ограничил частоту запросов. Повтор поставлен в очередь.' ),
-		'failed'        => array( 'error', 'Не удалось подтвердить отправку. Проверьте чат перед повтором.' ),
+		'invalid_order'     => array( 'error', 'Введите корректный ID заказа.' ),
+		'unavailable_order' => array( 'error', 'Заказ с таким ID отсутствует или ещё оформляется.' ),
+		'already_sent'      => array( 'info', 'Telegram уже принял уведомление об этом заказе.' ),
+		'sent'              => array( 'success', 'Telegram принял уведомление.' ),
+		'scheduled'         => array( 'warning', 'Telegram ограничил частоту запросов. Повтор поставлен в очередь.' ),
+		'failed'            => array( 'error', 'Не удалось подтвердить отправку. Проверьте чат перед повтором.' ),
 	);
 	list( $type, $message ) = $messages[ $result ];
 	wp_admin_notice( esc_html( trim( $message . ' ' . $detail ) ), array( 'type' => $type ) );
@@ -141,7 +141,7 @@ function render_settings_page(): void {
 			<?php submit_button(); ?>
 		</form>
 		<h2>Ручная отправка</h2>
-		<p>Введите внутренний ID оплаченного заказа WooCommerce, чтобы отправить уведомление сразу.</p>
+		<p>Введите внутренний ID заказа WooCommerce, чтобы отправить уведомление сразу.</p>
 		<form action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" method="post">
 			<input type="hidden" name="action" value="<?php echo esc_attr( MANUAL_SEND_ACTION ); ?>">
 			<?php wp_nonce_field( MANUAL_SEND_ACTION ); ?>

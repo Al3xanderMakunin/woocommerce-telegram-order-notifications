@@ -2,8 +2,8 @@
 /**
  * Plugin Name: WooCommerce Telegram Order Notifications
  * Plugin URI: https://github.com/Al3xanderMakunin/woocommerce-telegram-order-notifications
- * Description: Sends paid-order notifications to Telegram independently of WordPress email.
- * Version: 1.0.0
+ * Description: Sends order notifications to Telegram independently of WordPress email.
+ * Version: 1.1.0
  * Author: Александр Макунин
  * Requires at least: 6.5
  * Requires PHP: 8.0
@@ -15,6 +15,7 @@ namespace WC_Telegram_Order_Notifications;
 
 defined( 'ABSPATH' ) || exit;
 
+// Keep the hook name so previously queued notifications can still run.
 const SEND_HOOK = 'wcton_send_paid_order';
 const GROUP = 'wc-telegram-orders';
 const MESSAGE_ID_META = '_wcton_message_id';
@@ -32,9 +33,8 @@ add_action( 'before_woocommerce_init', static function () {
 	}
 } );
 
-add_action( 'woocommerce_payment_complete', __NAMESPACE__ . '\enqueue_automatically' );
-add_action( 'woocommerce_order_status_processing', __NAMESPACE__ . '\enqueue_automatically' );
-add_action( 'woocommerce_order_status_completed', __NAMESPACE__ . '\enqueue_automatically' );
+add_action( 'woocommerce_new_order', __NAMESPACE__ . '\enqueue_automatically' );
+add_action( 'woocommerce_order_status_changed', __NAMESPACE__ . '\enqueue_automatically' );
 add_action( SEND_HOOK, __NAMESPACE__ . '\send_order', 10, 3 );
 
 function external_config_value( string $key ): ?string {
@@ -103,13 +103,14 @@ function telegram_request( string $base, string $method, array $body ): array {
 	throw new \RuntimeException( sprintf( 'Unexpected Bot API response (HTTP %d). Delivery is unconfirmed.', $status ) );
 }
 
-function paid_order( int $order_id ): ?\WC_Order {
+function get_order_for_notification( int $order_id ): ?\WC_Order {
 	$order = function_exists( 'wc_get_order' ) ? wc_get_order( $order_id ) : false;
-	return $order instanceof \WC_Order && $order->get_date_paid() && $order->is_paid() ? $order : null;
+	// Checkout Blocks creates a draft before the customer submits the order.
+	return $order instanceof \WC_Order && ! $order->has_status( 'checkout-draft' ) ? $order : null;
 }
 
 function enqueue_automatically( int $order_id ): void {
-	$order = paid_order( $order_id );
+	$order = get_order_for_notification( $order_id );
 	if ( ! did_action( 'action_scheduler_init' ) || ! $order ||
 		$order->get_meta( MESSAGE_ID_META ) || $order->get_meta( IN_FLIGHT_META ) ) {
 		return;
@@ -135,7 +136,7 @@ function enqueue( int $order_id, bool $retry_unconfirmed = false ): int {
 function message_for( \WC_Order $order ): string {
 	$total = html_entity_decode( wp_strip_all_tags( $order->get_formatted_order_total() ), ENT_QUOTES, 'UTF-8' );
 	return sprintf(
-		"Оплачен заказ №%s\nСумма: %s\nСтатус: %s\n%s",
+		"Заказ №%s\nСумма: %s\nСтатус: %s\n%s",
 		$order->get_order_number(),
 		$total,
 		wc_get_order_status_name( $order->get_status() ),
@@ -152,9 +153,9 @@ function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = 
 	}
 
 	try {
-		$order = paid_order( $order_id );
+		$order = get_order_for_notification( $order_id );
 		if ( ! $order ) {
-			return 'unpaid';
+			return 'unavailable_order';
 		}
 		// Another worker may have saved a receipt before we acquired the lock.
 		$order->read_meta_data( true );
@@ -232,9 +233,9 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		}
 		$failed = false;
 		foreach ( $args as $id ) {
-			$order = ctype_digit( $id ) ? paid_order( (int) $id ) : null;
+			$order = ctype_digit( $id ) ? get_order_for_notification( (int) $id ) : null;
 			if ( ! $order ) {
-				\WP_CLI::warning( 'Skipped an invalid, missing or unpaid order.' );
+				\WP_CLI::warning( 'Skipped an invalid, missing or draft order.' );
 				$failed = true;
 				continue;
 			}
