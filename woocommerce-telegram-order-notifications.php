@@ -121,6 +121,20 @@ function get_order_for_notification( int $order_id ): ?\WC_Order {
 	return $order instanceof \WC_Order && ! $order->has_status( 'checkout-draft' ) ? $order : null;
 }
 
+function log_order_error( int $order_id, \RuntimeException $error ): void {
+	$settings = (array) get_option( SETTINGS_OPTION, array() );
+	if ( ( $settings['error_logging'] ?? '0' ) !== '1' || ! function_exists( 'wc_get_logger' ) ) {
+		return;
+	}
+
+	$message = $error->getMessage();
+	$token = config_value( 'WCTON_BOT_TOKEN', $settings );
+	if ( $token !== '' ) {
+		$message = str_replace( $token, '[redacted]', $message );
+	}
+	wc_get_logger()->error( sprintf( 'Order %d: %s', $order_id, $message ), array( 'source' => GROUP ) );
+}
+
 function enqueue_automatically( int $order_id ): void {
 	$order = get_order_for_notification( $order_id );
 	if ( ! did_action( 'action_scheduler_init' ) || ! $order ||
@@ -131,7 +145,7 @@ function enqueue_automatically( int $order_id ): void {
 	try {
 		configuration();
 	} catch ( \RuntimeException $error ) {
-		wc_get_logger()->warning( $error->getMessage(), array( 'source' => GROUP ) );
+		log_order_error( $order_id, $error );
 		return;
 	}
 	enqueue( $order_id );
@@ -281,6 +295,15 @@ function telegram_order_request( string $base, string $chat_id, string $message,
 }
 
 function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = false, string $retry_chat_id = '', bool $resend = false ): string {
+	try {
+		return deliver_order( $order_id, $attempt, $retry_unconfirmed, $retry_chat_id, $resend );
+	} catch ( \RuntimeException $error ) {
+		log_order_error( $order_id, $error );
+		throw $error;
+	}
+}
+
+function deliver_order( int $order_id, int $attempt, bool $retry_unconfirmed, string $retry_chat_id, bool $resend ): string {
 	global $wpdb;
 
 	$lock = 'wcton:' . substr( hash( 'sha256', $wpdb->prefix . ':' . DB_NAME . ':' . $order_id ), 0, 48 );

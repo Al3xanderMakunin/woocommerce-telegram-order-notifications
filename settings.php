@@ -40,6 +40,9 @@ function sanitize_settings( $input ): array {
 	$input = (array) $input;
 	$previous = (array) get_option( SETTINGS_OPTION, array() );
 	$settings = $previous;
+	if ( isset( $input['error_logging'] ) ) {
+		$settings['error_logging'] = $input['error_logging'] === '1' ? '1' : '0';
+	}
 	$valid = true;
 	foreach ( settings_fields_definition() as $key => [ , $type, , $validator, $error ] ) {
 		if ( external_config_value( $key ) !== null ) {
@@ -142,6 +145,20 @@ function render_settings_page(): void {
 						</td>
 					</tr>
 				<?php endforeach; ?>
+				<tr>
+					<th scope="row"><label for="wcton_error_logging">Журнал ошибок</label></th>
+					<td>
+						<input type="hidden" name="wcton_settings[error_logging]" value="0">
+						<label>
+							<input id="wcton_error_logging" name="wcton_settings[error_logging]" type="checkbox" value="1" <?php checked( $settings['error_logging'] ?? '0', '1' ); ?>>
+							Записывать ошибки отправки уведомлений
+						</label>
+						<p class="description">После отключения ранее записанные ошибки доступны до истечения срока хранения журналов WooCommerce.</p>
+						<?php if ( current_user_can( 'manage_woocommerce' ) ) : ?>
+							<p><a href="<?php echo esc_url( admin_url( 'admin.php?page=wc-status&tab=logs&source=' . GROUP ) ); ?>">Просмотреть журнал ошибок плагина</a></p>
+						<?php endif; ?>
+					</td>
+				</tr>
 			</table>
 			<?php submit_button(); ?>
 		</form>
