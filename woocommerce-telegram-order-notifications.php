@@ -143,7 +143,7 @@ function message_for( \WC_Order $order ): string {
 	);
 }
 
-function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = false ): void {
+function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = false ): string {
 	global $wpdb;
 
 	$lock = 'wcton:' . substr( hash( 'sha256', $wpdb->prefix . ':' . DB_NAME . ':' . $order_id ), 0, 48 );
@@ -153,8 +153,13 @@ function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = 
 
 	try {
 		$order = paid_order( $order_id );
-		if ( ! $order || $order->get_meta( MESSAGE_ID_META ) ) {
-			return;
+		if ( ! $order ) {
+			return 'unpaid';
+		}
+		// Another worker may have saved a receipt before we acquired the lock.
+		$order->read_meta_data( true );
+		if ( $order->get_meta( MESSAGE_ID_META ) ) {
+			return 'already_sent';
 		}
 		if ( $order->get_meta( IN_FLIGHT_META ) && ! $retry_unconfirmed ) {
 			throw new \RuntimeException( 'A previous delivery is unconfirmed. Check the Telegram chat before retrying.' );
@@ -174,7 +179,7 @@ function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = 
 			$order->save_meta_data();
 			$order->delete_meta_data( IN_FLIGHT_META );
 			$order->save_meta_data();
-			return;
+			return 'sent';
 		}
 
 		$error_code = $data['error_code'] ?? null;
@@ -185,7 +190,7 @@ function send_order( int $order_id, int $attempt = 0, bool $retry_unconfirmed = 
 				$delay = max( 60, (int) ( $data['parameters']['retry_after'] ?? 60 ) );
 				$action = as_schedule_single_action( time() + $delay, SEND_HOOK, array( $order_id, $attempt + 1, false ), GROUP );
 				if ( $action ) {
-					return;
+					return 'scheduled';
 				}
 			}
 			throw new \RuntimeException( sprintf( 'Telegram rejected the notification (API code %d).', $error_code ) );
