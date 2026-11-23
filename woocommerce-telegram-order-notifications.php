@@ -1,8 +1,10 @@
 <?php
 /**
  * Plugin Name: WooCommerce Telegram Order Notifications
+ * Plugin URI: https://github.com/Al3xanderMakunin/woocommerce-telegram-order-notifications
  * Description: Sends paid-order notifications to Telegram independently of WordPress email.
  * Version: 1.0.0
+ * Author: Александр Макунин
  * Requires at least: 6.5
  * Requires PHP: 8.0
  * Requires Plugins: woocommerce
