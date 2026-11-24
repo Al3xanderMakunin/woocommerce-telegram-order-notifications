@@ -34,7 +34,7 @@ add_action( 'before_woocommerce_init', static function () {
 	}
 } );
 
-add_action( 'woocommerce_new_order', __NAMESPACE__ . '\enqueue_automatically' );
+add_action( 'woocommerce_payment_complete', __NAMESPACE__ . '\enqueue_automatically' );
 add_action( 'woocommerce_order_status_changed', __NAMESPACE__ . '\enqueue_automatically' );
 add_action( SEND_HOOK, __NAMESPACE__ . '\send_order', 10, 5 );
 
@@ -121,6 +121,12 @@ function get_order_for_notification( int $order_id ): ?\WC_Order {
 	return $order instanceof \WC_Order && ! $order->has_status( 'checkout-draft' ) ? $order : null;
 }
 
+function is_paid_for_notification( \WC_Order $order ): bool {
+	// WooCommerce can put cash-on-delivery orders into processing before payment is collected.
+	return $order->is_paid() &&
+		( $order->get_payment_method() !== 'cod' || $order->has_status( 'completed' ) );
+}
+
 function log_order_error( int $order_id, \RuntimeException $error ): void {
 	$settings = (array) get_option( SETTINGS_OPTION, array() );
 	if ( ( $settings['error_logging'] ?? '0' ) !== '1' || ! function_exists( 'wc_get_logger' ) ) {
@@ -137,7 +143,7 @@ function log_order_error( int $order_id, \RuntimeException $error ): void {
 
 function enqueue_automatically( int $order_id ): void {
 	$order = get_order_for_notification( $order_id );
-	if ( ! did_action( 'action_scheduler_init' ) || ! $order ||
+	if ( ! did_action( 'action_scheduler_init' ) || ! $order || ! is_paid_for_notification( $order ) ||
 		$order->get_meta( MESSAGE_ID_META ) || $order->get_meta( IN_FLIGHT_META ) ||
 		$order->get_meta( CHAT_DELIVERY_META ) ) {
 		return;
@@ -329,6 +335,9 @@ function deliver_order( int $order_id, int $attempt, bool $retry_unconfirmed, st
 		if ( ! $order ) {
 			return 'unavailable_order';
 		}
+		if ( ! is_paid_for_notification( $order ) ) {
+			return 'unpaid_order';
+		}
 		// Another worker may have saved a receipt before we acquired the lock.
 		$order->read_meta_data( true );
 		if ( ! $resend && $order->get_meta( MESSAGE_ID_META ) ) {
@@ -466,6 +475,11 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			$order = ctype_digit( $id ) ? get_order_for_notification( (int) $id ) : null;
 			if ( ! $order ) {
 				\WP_CLI::warning( 'Skipped an invalid, missing or draft order.' );
+				$failed = true;
+				continue;
+			}
+			if ( ! is_paid_for_notification( $order ) ) {
+				\WP_CLI::warning( sprintf( 'Order %d is not paid.', $order->get_id() ) );
 				$failed = true;
 				continue;
 			}

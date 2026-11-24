@@ -100,6 +100,7 @@ function render_manual_send_notice(): void {
 	$messages = array(
 		'invalid_order'     => array( 'error', 'Введите корректный ID заказа.' ),
 		'unavailable_order' => array( 'error', 'Заказ с таким ID отсутствует или ещё оформляется.' ),
+		'unpaid_order'      => array( 'error', 'WooCommerce ещё не подтвердил оплату заказа.' ),
 		'already_sent'      => array( 'info', 'Telegram уже принял уведомление об этом заказе.' ),
 		'sent'              => array( 'success', 'Telegram принял уведомление.' ),
 		'scheduled'         => array( 'warning', 'Telegram ограничил частоту запросов. Повтор поставлен в очередь.' ),
@@ -163,7 +164,7 @@ function render_settings_page(): void {
 			<?php submit_button(); ?>
 		</form>
 		<h2>Ручная отправка</h2>
-		<p>Введите внутренний ID заказа WooCommerce. Уведомление отправится во все настроенные чаты, даже если Telegram уже принял его ранее.</p>
+		<p>Введите внутренний ID оплаченного заказа WooCommerce. Уведомление отправится во все настроенные чаты, даже если Telegram уже принял его ранее.</p>
 		<form action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" method="post">
 			<input type="hidden" name="action" value="<?php echo esc_attr( MANUAL_SEND_ACTION ); ?>">
 			<?php wp_nonce_field( MANUAL_SEND_ACTION ); ?>
