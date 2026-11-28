@@ -255,6 +255,7 @@ function message_for( \WC_Order $order ): string {
 	$shipping = $price( (float) $order->get_shipping_total() + ( $use_tax ? (float) $order->get_shipping_tax() : 0 ) );
 	$shipping_method = $escape( plain_text( $order->get_shipping_method() ) );
 	$payment = $escape( plain_text( $order->get_payment_method_title() ?: $order->get_payment_method() ) );
+	$comment = trim( $order->get_customer_note() );
 
 	return implode( "\n", array_merge(
 		$lines,
@@ -278,6 +279,7 @@ function message_for( \WC_Order $order ): string {
 			'',
 		),
 		array_map( $escape, billing_address_lines( $order ) ),
+		$comment !== '' ? array( '', 'Комментарий: ' . $escape( $comment ) ) : array(),
 		array(
 			'',
 			'Поздравляем вас с продажей.',
